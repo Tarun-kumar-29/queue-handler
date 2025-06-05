@@ -24,11 +24,14 @@ type JobHandler struct {
 }
 
 type ScheduleJobResponse struct {
-	Success bool   `json:"success"`
-	JobID   string `json:"job_id"`
-	CallID  string `json:"call_id"`
-	TaskID  string `json:"task_id,omitempty"`
-	Message string `json:"message"`
+	Success   bool   `json:"success"`
+	JobID     string `json:"job_id"`
+	RequestID string `json:"request_id"` // Generalized from CallID
+	TaskID    string `json:"task_id,omitempty"`
+	Message   string `json:"message"`
+
+	// Backward compatibility
+	CallID string `json:"call_id,omitempty"` // For backward compatibility
 }
 
 type ErrorResponse struct {
@@ -121,10 +124,11 @@ func (h *JobHandler) ScheduleJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := ScheduleJobResponse{
-		Success: true,
-		JobID:   job.ID,
-		CallID:  job.CallID,
-		TaskID:  job.TaskID,
+		Success:   true,
+		JobID:     job.ID,
+		RequestID: job.RequestID,
+		TaskID:    job.TaskID,
+		CallID:    job.RequestID, // Backward compatibility
 		Message: fmt.Sprintf("Job scheduled in queue '%s' with %d workers (completion: %s)",
 			job.QueueName, concurrency, job.CompletionMode),
 	}
@@ -133,8 +137,178 @@ func (h *JobHandler) ScheduleJob(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("✅ Job scheduled with dedicated workers: ID=%s, CallID=%s, URL=%s, Queue=%s, Workers=%d",
-		job.ID, job.CallID, job.URL, job.QueueName, concurrency)
+	log.Printf("✅ Job scheduled with dedicated workers: ID=%s, RequestID=%s, URL=%s, Queue=%s, Workers=%d",
+		job.ID, job.RequestID, job.URL, job.QueueName, concurrency)
+}
+
+// ScheduleBulkJobs handles bulk job scheduling requests with generalized validation
+func (h *JobHandler) ScheduleBulkJobs(w http.ResponseWriter, r *http.Request) {
+	var bulkReq models.BulkJobRequest
+
+	// Parse request body
+	if err := json.NewDecoder(r.Body).Decode(&bulkReq); err != nil {
+		h.sendErrorResponse(w, "Invalid JSON request", http.StatusBadRequest)
+		return
+	}
+
+	// Validate bulk request
+	if len(bulkReq.Jobs) == 0 {
+		h.sendErrorResponse(w, "At least one job is required", http.StatusBadRequest)
+		return
+	}
+
+	if len(bulkReq.Jobs) > 1000 {
+		h.sendErrorResponse(w, "Maximum 100 jobs allowed per bulk request", http.StatusBadRequest)
+		return
+	}
+
+	// Validate each job with generalized logic
+	for i, job := range bulkReq.Jobs {
+		// Core validation - URL is always required
+		if job.URL == "" {
+			h.sendErrorResponse(w, fmt.Sprintf("Job %d: URL is required", i+1), http.StatusBadRequest)
+			return
+		}
+
+		// Flexible identification validation - check for any identification fields
+		hasIdentification := false
+		identificationFields := []string{"job_id", "request_id", "agent_id", "prospect_id", "call_id"}
+
+		// Check direct fields
+		if job.JobID != "" || job.RequestID != "" || job.AgentID != "" || job.ProspectID != "" || job.CallID != "" {
+			hasIdentification = true
+		}
+
+		// Check metadata for identification
+		if !hasIdentification && job.Metadata != nil {
+			for _, field := range identificationFields {
+				if val, exists := job.Metadata[field]; exists && val != nil {
+					if strVal, ok := val.(string); ok && strVal != "" {
+						hasIdentification = true
+						break
+					}
+				}
+			}
+
+			// Check for common ID fields in metadata
+			commonIDFields := []string{"user_id", "customer_id", "tenant_id", "service_id", "entity_id"}
+			if !hasIdentification {
+				for _, field := range commonIDFields {
+					if val, exists := job.Metadata[field]; exists && val != nil {
+						if strVal, ok := val.(string); ok && strVal != "" {
+							hasIdentification = true
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// Backward compatibility: still require agent_id and prospect_id for call-related jobs
+		// This can be removed once all clients are updated
+		if job.AgentID == "" && job.ProspectID == "" && !hasIdentification {
+			// Check if this is a legacy call-related job request
+			isLegacyCall := (job.Metadata == nil ||
+				(job.Metadata["job_type"] == nil && job.Metadata["service_name"] == nil))
+
+			if isLegacyCall {
+				h.sendErrorResponse(w, fmt.Sprintf("Job %d: identification required (agent_id, prospect_id, job_id, request_id, or metadata identification)", i+1), http.StatusBadRequest)
+				return
+			}
+		}
+
+		// Validate HTTP method if provided
+		if job.Method != "" {
+			validMethods := map[string]bool{
+				"GET": true, "POST": true, "PUT": true, "DELETE": true,
+				"PATCH": true, "HEAD": true, "OPTIONS": true,
+			}
+			method := strings.ToUpper(job.Method)
+			if !validMethods[method] {
+				h.sendErrorResponse(w, fmt.Sprintf("Job %d: Invalid HTTP method '%s'", i+1, job.Method), http.StatusBadRequest)
+				return
+			}
+			bulkReq.Jobs[i].Method = method
+		}
+
+		// Validate concurrency if provided
+		if job.RequestedConcurrency < 0 {
+			h.sendErrorResponse(w, fmt.Sprintf("Job %d: Concurrency must be 0 or positive", i+1), http.StatusBadRequest)
+			return
+		}
+		if job.RequestedConcurrency > 100 {
+			h.sendErrorResponse(w, fmt.Sprintf("Job %d: Concurrency cannot exceed 100", i+1), http.StatusBadRequest)
+			return
+		}
+
+		// Validate completion mode if provided
+		if job.CompletionMode != "" {
+			validModes := map[string]bool{
+				"immediate": true,
+				"webhook":   true,
+			}
+			if !validModes[job.CompletionMode] {
+				h.sendErrorResponse(w, fmt.Sprintf("Job %d: Invalid completion_mode. Use 'immediate' or 'webhook'", i+1), http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// Validate global defaults
+	if bulkReq.DefaultMethod != "" {
+		validMethods := map[string]bool{
+			"GET": true, "POST": true, "PUT": true, "DELETE": true,
+			"PATCH": true, "HEAD": true, "OPTIONS": true,
+		}
+		method := strings.ToUpper(bulkReq.DefaultMethod)
+		if !validMethods[method] {
+			h.sendErrorResponse(w, fmt.Sprintf("Invalid default HTTP method '%s'", bulkReq.DefaultMethod), http.StatusBadRequest)
+			return
+		}
+		bulkReq.DefaultMethod = method
+	}
+
+	if bulkReq.DefaultConcurrency < 0 {
+		h.sendErrorResponse(w, "Default concurrency must be 0 or positive", http.StatusBadRequest)
+		return
+	}
+
+	if bulkReq.DefaultConcurrency > 1000 {
+		h.sendErrorResponse(w, "Default concurrency cannot exceed 100", http.StatusBadRequest)
+		return
+	}
+
+	// Set global defaults if not provided
+	if bulkReq.DefaultMethod == "" {
+		bulkReq.DefaultMethod = "POST"
+	}
+	if bulkReq.DefaultMaxRetries == 0 {
+		bulkReq.DefaultMaxRetries = h.config.MaxRetries
+	}
+	if bulkReq.DefaultConcurrency == 0 {
+		bulkReq.DefaultConcurrency = h.config.DefaultConcurrency
+	}
+
+	// Process bulk jobs
+	response, err := h.queueManager.EnqueueBulkJobs(&bulkReq)
+	if err != nil {
+		log.Printf("❌ Failed to process bulk jobs: %v", err)
+		h.sendErrorResponse(w, "Failed to process bulk job request", http.StatusInternalServerError)
+		return
+	}
+
+	// Set appropriate HTTP status
+	statusCode := http.StatusCreated
+	if response.Failed > 0 {
+		statusCode = http.StatusMultiStatus // 207 - Some succeeded, some failed
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(response)
+
+	log.Printf("📦 Bulk job request completed: %d successful, %d failed, %d queues used",
+		response.Successful, response.Failed, len(response.QueueSummary))
 }
 
 // GetJob returns information about a specific job
@@ -154,7 +328,24 @@ func (h *JobHandler) GetJob(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(job)
 }
 
-// GetJobByCallID returns information about a job by CallID
+// GetJobByRequestID returns information about a job by RequestID
+func (h *JobHandler) GetJobByRequestID(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	requestID := vars["request_id"]
+
+	job, err := h.queueManager.GetJobByRequestID(requestID)
+	if err != nil {
+		log.Printf("❌ Failed to get job by RequestID %s: %v", requestID, err)
+		h.sendErrorResponse(w, "Job not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(job)
+}
+
+// GetJobByCallID returns information about a job by CallID (backward compatibility)
 func (h *JobHandler) GetJobByCallID(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	callID := vars["call_id"]
@@ -169,6 +360,45 @@ func (h *JobHandler) GetJobByCallID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(job)
+}
+
+// ClearQueue clears all jobs from a specific queue
+func (h *JobHandler) ClearQueue(w http.ResponseWriter, r *http.Request) {
+	var req models.ClearQueueRequest
+
+	// Parse request body
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendErrorResponse(w, "Invalid JSON request", http.StatusBadRequest)
+		return
+	}
+
+	// Validate queue name
+	if req.QueueName == "" {
+		h.sendErrorResponse(w, "Queue name is required", http.StatusBadRequest)
+		return
+	}
+
+	// Clear the queue
+	deletedCount, err := h.queueManager.ClearQueue(req.QueueName)
+	if err != nil {
+		log.Printf("❌ Failed to clear queue %s: %v", req.QueueName, err)
+		h.sendErrorResponse(w, fmt.Sprintf("Failed to clear queue: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Send response
+	response := models.ClearQueueResponse{
+		Success:     true,
+		QueueName:   req.QueueName,
+		Message:     fmt.Sprintf("Successfully cleared queue '%s'", req.QueueName),
+		DeletedJobs: deletedCount,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(response)
+
+	log.Printf("🧹 Queue cleared via API: Queue=%s, DeletedJobs=%d", req.QueueName, deletedCount)
 }
 
 // GetQueueStats returns statistics for a specific queue using Asynq
@@ -193,6 +423,9 @@ func (h *JobHandler) GetQueueStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
+// Rest of the handler methods remain largely the same...
+// [Including ListQueues, ScaleQueue, GetWorkerStats, etc. with updated logging]
+
 // ListQueues returns all active queues
 func (h *JobHandler) ListQueues(w http.ResponseWriter, r *http.Request) {
 	queues, err := h.queueManager.ListQueues()
@@ -212,7 +445,7 @@ func (h *JobHandler) ListQueues(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// ScaleQueue adjusts the number of workers for a queue (limited with Asynq)
+// ScaleQueue adjusts the number of workers for a queue
 func (h *JobHandler) ScaleQueue(w http.ResponseWriter, r *http.Request) {
 	queueName := r.URL.Query().Get("queue")
 	if queueName == "" {
@@ -232,7 +465,7 @@ func (h *JobHandler) ScaleQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Asynq doesn't support dynamic scaling, inform user
+	// Scale workers
 	if err := h.workerManager.ScaleWorkers(queueName, workers); err != nil {
 		h.sendErrorResponse(w, "Failed to scale workers", http.StatusInternalServerError)
 		return
@@ -242,9 +475,8 @@ func (h *JobHandler) ScaleQueue(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"queue":   queueName,
 		"workers": workers,
-		"message": fmt.Sprintf("Scaling request noted for queue '%s'. Asynq requires restart for scaling.", queueName),
+		"message": fmt.Sprintf("Scaled queue '%s' to %d workers", queueName, workers),
 		"backend": "asynq",
-		"note":    "Dynamic scaling requires worker restart with new concurrency configuration",
 	}
 
 	w.Header().Set("Content-Type", "application/json")

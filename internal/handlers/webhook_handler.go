@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	// "context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,36 +18,38 @@ type WebhookHandler struct {
 
 // Flexible webhook request structure to handle different external service formats
 type WebhookRequest struct {
-	// Different possible call_id field names
-	CallID   string `json:"call_id"`
-	CallId   string `json:"callId"`     // Alternative naming
-	ID       string `json:"id"`         // Some services use just "id"
-	
-	// Different possible job_id field names  
-	JobID    string `json:"job_id"`
-	JobId    string `json:"jobId"`      // Alternative naming
-	
+	// Different possible request_id/call_id field names
+	RequestID string `json:"request_id"`
+	CallID    string `json:"call_id"` // Backward compatibility
+	CallId    string `json:"callId"`  // Alternative naming
+	ID        string `json:"id"`      // Some services use just "id"
+
+	// Different possible job_id field names
+	JobID string `json:"job_id"`
+	JobId string `json:"jobId"` // Alternative naming
+
 	// Status fields - with flexible acceptance
-	Status   string `json:"status"`
-	State    string `json:"state"`      // Some services use "state"
-	Result   string `json:"result"`     // Some services use "result"
-	
+	Status string `json:"status"`
+	State  string `json:"state"`  // Some services use "state"
+	Result string `json:"result"` // Some services use "result"
+
 	// Additional fields
 	Response map[string]interface{} `json:"response,omitempty"`
-	Data     map[string]interface{} `json:"data,omitempty"`     // Some services wrap in "data"
+	Data     map[string]interface{} `json:"data,omitempty"` // Some services wrap in "data"
 	Error    string                 `json:"error,omitempty"`
 	Message  string                 `json:"message,omitempty"`
 	RetryAt  *time.Time             `json:"retry_at,omitempty"`
-	
+
 	// Raw map to capture any other fields
 	Raw map[string]interface{} `json:"-"`
 }
 
 type WebhookResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	JobID   string `json:"job_id,omitempty"`
-	CallID  string `json:"call_id,omitempty"`
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	JobID     string `json:"job_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	CallID    string `json:"call_id,omitempty"` // Backward compatibility
 }
 
 func NewWebhookHandler(queueManager *queue.Manager) *WebhookHandler {
@@ -69,15 +70,21 @@ func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to our flexible webhook request
 	webhookReq := h.parseFlexibleWebhook(rawData)
-	
-	log.Printf("🔗 Raw webhook received: %+v", rawData)
-	log.Printf("🔗 Parsed webhook: CallID=%s, JobID=%s, Status=%s", 
-		webhookReq.CallID, webhookReq.JobID, webhookReq.Status)
 
-	// Validate we have either call_id or job_id
-	if webhookReq.CallID == "" && webhookReq.JobID == "" {
+	log.Printf("🔗 Raw webhook received: %+v", rawData)
+	log.Printf("🔗 Parsed webhook: RequestID=%s, CallID=%s, JobID=%s, Status=%s",
+		webhookReq.RequestID, webhookReq.CallID, webhookReq.JobID, webhookReq.Status)
+
+	// Get the primary identifier (prefer RequestID, fallback to CallID)
+	primaryID := webhookReq.RequestID
+	if primaryID == "" {
+		primaryID = webhookReq.CallID
+	}
+
+	// Validate we have either request_id/call_id or job_id
+	if primaryID == "" && webhookReq.JobID == "" {
 		log.Printf("❌ Webhook missing identifiers: %+v", rawData)
-		h.sendErrorResponse(w, "Either call_id or job_id is required", http.StatusBadRequest)
+		h.sendErrorResponse(w, "Either request_id/call_id or job_id is required", http.StatusBadRequest)
 		return
 	}
 
@@ -87,33 +94,38 @@ func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		log.Printf("🔗 No status provided, defaulting to 'completed'")
 	}
 
-	// Get job (prefer JobID, fallback to CallID)
+	// Get job (prefer JobID, fallback to RequestID/CallID)
 	var job *models.Job
 	var err error
-	
+
 	if webhookReq.JobID != "" {
 		job, err = h.queueManager.GetJob(webhookReq.JobID)
 		if err != nil {
-			log.Printf("❌ Job not found by JobID=%s, trying CallID=%s", webhookReq.JobID, webhookReq.CallID)
+			log.Printf("❌ Job not found by JobID=%s, trying RequestID/CallID=%s", webhookReq.JobID, primaryID)
 		}
 	}
-	
-	if job == nil && webhookReq.CallID != "" {
-		job, err = h.queueManager.GetJobByCallID(webhookReq.CallID)
+
+	if job == nil && primaryID != "" {
+		// Try both RequestID and CallID lookup methods
+		job, err = h.queueManager.GetJobByRequestID(primaryID)
+		if err != nil {
+			// Fallback to CallID method for backward compatibility
+			job, err = h.queueManager.GetJobByCallID(primaryID)
+		}
 	}
 
 	if err != nil || job == nil {
-		log.Printf("❌ Failed to find job: CallID=%s, JobID=%s, Error=%v", 
-			webhookReq.CallID, webhookReq.JobID, err)
+		log.Printf("❌ Failed to find job: RequestID/CallID=%s, JobID=%s, Error=%v",
+			primaryID, webhookReq.JobID, err)
 		h.sendErrorResponse(w, "Job not found", http.StatusNotFound)
 		return
 	}
 
-	log.Printf("🔗 Webhook received: CallID=%s, JobID=%s, Status=%s", 
-		webhookReq.CallID, job.ID, webhookReq.Status)
+	log.Printf("🔗 Webhook received: RequestID=%s, JobID=%s, Status=%s",
+		primaryID, job.ID, webhookReq.Status)
 
 	// CRITICAL: Update Redis status BEFORE processing to unblock waiting worker
-	h.updateWebhookStatusInRedis(job.ID, webhookReq.CallID, webhookReq.Status)
+	h.updateWebhookStatusInRedis(job.ID, primaryID, webhookReq.Status)
 
 	// Process webhook based on status
 	if err := h.processWebhookConfirmation(job, &webhookReq); err != nil {
@@ -125,25 +137,26 @@ func (h *WebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Send successful response
 	response := WebhookResponse{
-		Success: true,
-		Message: "Webhook processed successfully",
-		JobID:   job.ID,
-		CallID:  webhookReq.CallID,
+		Success:   true,
+		Message:   "Webhook processed successfully",
+		JobID:     job.ID,
+		RequestID: job.RequestID,
+		CallID:    job.RequestID, // Backward compatibility
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(response)
 
-	log.Printf("✅ Webhook processed: CallID=%s, JobID=%s, FinalStatus=%s", 
-		webhookReq.CallID, job.ID, job.Status)
+	log.Printf("✅ Webhook processed: RequestID=%s, JobID=%s, FinalStatus=%s",
+		job.RequestID, job.ID, job.Status)
 }
 
 // updateWebhookStatusInRedis updates the webhook status in Redis to unblock waiting workers
-func (h *WebhookHandler) updateWebhookStatusInRedis(jobID, callID, status string) {
+func (h *WebhookHandler) updateWebhookStatusInRedis(jobID, requestID, status string) {
 	// Normalize status for Redis storage
 	redisStatus := "completed" // Default
-	
+
 	normalizedStatus := strings.ToLower(strings.TrimSpace(status))
 	switch normalizedStatus {
 	case "success", "completed", "complete", "ok", "done", "finished", "successful":
@@ -165,12 +178,12 @@ func (h *WebhookHandler) updateWebhookStatusInRedis(jobID, callID, status string
 		log.Printf("✅ Webhook status updated in Redis: JobID=%s, Status=%s", jobID, redisStatus)
 	}
 
-	// Also update with callID key for backup lookup
-	if callID != "" && callID != jobID {
-		callKey := fmt.Sprintf("webhook_status:call:%s", callID)
-		err := h.queueManager.RedisClient.Set(callKey, redisStatus, time.Hour)
+	// Also update with requestID key for backup lookup
+	if requestID != "" && requestID != jobID {
+		requestKey := fmt.Sprintf("webhook_status:request:%s", requestID)
+		err := h.queueManager.RedisClient.Set(requestKey, redisStatus, time.Hour)
 		if err != nil {
-			log.Printf("⚠️ Failed to update webhook status by callID in Redis: CallID=%s, Error=%v", callID, err)
+			log.Printf("⚠️ Failed to update webhook status by requestID in Redis: RequestID=%s, Error=%v", requestID, err)
 		}
 	}
 }
@@ -179,9 +192,16 @@ func (h *WebhookHandler) updateWebhookStatusInRedis(jobID, callID, status string
 func (h *WebhookHandler) parseFlexibleWebhook(rawData map[string]interface{}) WebhookRequest {
 	req := WebhookRequest{Raw: rawData}
 
-	// Extract call_id from various possible field names
+	// Extract request_id/call_id from various possible field names
+	if requestID := h.extractStringField(rawData, "request_id", "requestId"); requestID != "" {
+		req.RequestID = requestID
+	}
 	if callID := h.extractStringField(rawData, "call_id", "callId", "id"); callID != "" {
 		req.CallID = callID
+		// If no RequestID found, use CallID as RequestID for backward compatibility
+		if req.RequestID == "" {
+			req.RequestID = callID
+		}
 	}
 
 	// Extract job_id from various possible field names
@@ -229,7 +249,7 @@ func (h *WebhookHandler) extractStringField(data map[string]interface{}, fieldNa
 // normalizeStatus converts various status formats to our standard format
 func (h *WebhookHandler) normalizeStatus(status string) string {
 	status = strings.ToLower(strings.TrimSpace(status))
-	
+
 	// Map various success statuses
 	successStatuses := []string{"success", "completed", "complete", "ok", "done", "finished", "successful"}
 	for _, s := range successStatuses {
@@ -237,7 +257,7 @@ func (h *WebhookHandler) normalizeStatus(status string) string {
 			return "completed"
 		}
 	}
-	
+
 	// Map various failure statuses
 	failureStatuses := []string{"fail", "failed", "failure", "error", "cancelled", "canceled", "aborted"}
 	for _, s := range failureStatuses {
@@ -245,7 +265,7 @@ func (h *WebhookHandler) normalizeStatus(status string) string {
 			return "failed"
 		}
 	}
-	
+
 	// Map various retry statuses
 	retryStatuses := []string{"retry", "reschedule", "requeue", "pending"}
 	for _, s := range retryStatuses {
@@ -253,7 +273,7 @@ func (h *WebhookHandler) normalizeStatus(status string) string {
 			return "retry"
 		}
 	}
-	
+
 	// Return original if no mapping found
 	return status
 }
@@ -265,13 +285,13 @@ func (h *WebhookHandler) processWebhookConfirmation(job *models.Job, webhookReq 
 	switch status {
 	case "success", "completed", "ok", "done":
 		return h.handleSuccessConfirmation(job, webhookReq)
-		
+
 	case "retry", "reschedule", "requeue":
 		return h.handleRetryConfirmation(job, webhookReq)
-		
+
 	case "fail", "failed", "error", "cancel", "cancelled":
 		return h.handleFailureConfirmation(job, webhookReq)
-		
+
 	default:
 		// For unknown statuses, default to success
 		log.Printf("⚠️ Unknown webhook status '%s', defaulting to success", webhookReq.Status)
@@ -283,7 +303,7 @@ func (h *WebhookHandler) processWebhookConfirmation(job *models.Job, webhookReq 
 func (h *WebhookHandler) handleSuccessConfirmation(job *models.Job, webhookReq *WebhookRequest) error {
 	// Verify job is in correct state
 	if job.Status != models.JobStatusAwaitingHook {
-		log.Printf("⚠️ Job %s is not awaiting webhook (status: %s), but processing anyway", 
+		log.Printf("⚠️ Job %s is not awaiting webhook (status: %s), but processing anyway",
 			job.ID, job.Status)
 	}
 
@@ -300,14 +320,14 @@ func (h *WebhookHandler) handleSuccessConfirmation(job *models.Job, webhookReq *
 
 	// Mark job as completed
 	job.MarkAsCompleted(job.Response)
-	
+
 	// Complete job in queue manager (this will remove webhook tracking)
 	if err := h.queueManager.CompleteJob(job); err != nil {
 		return fmt.Errorf("failed to complete job: %w", err)
 	}
 
 	log.Printf("✅ Job completed: ID=%s, Status=%s", job.ID, webhookReq.Status)
-	log.Printf("✅ Job completed via webhook confirmation: ID=%s, CallID=%s", job.ID, job.CallID)
+	log.Printf("✅ Job completed via webhook confirmation: ID=%s, RequestID=%s", job.ID, job.RequestID)
 	return nil
 }
 
@@ -316,7 +336,7 @@ func (h *WebhookHandler) handleRetryConfirmation(job *models.Job, webhookReq *We
 	// Check if job can be retried
 	if !job.IsRetryable() {
 		// Mark as failed if no more retries
-		errorMsg := fmt.Sprintf("webhook requested retry but max retries exceeded (%d/%d)", 
+		errorMsg := fmt.Sprintf("webhook requested retry but max retries exceeded (%d/%d)",
 			job.Retries, job.MaxRetries)
 		job.MarkAsFailed(errorMsg)
 		return h.queueManager.CompleteJob(job)
@@ -333,7 +353,7 @@ func (h *WebhookHandler) handleRetryConfirmation(job *models.Job, webhookReq *We
 	if webhookReq.Message != "" {
 		errorMsg = webhookReq.Message
 	}
-	
+
 	// Reset job state for retry
 	job.Status = models.JobStatusPending
 	job.ScheduledAt = retryAt
@@ -347,9 +367,9 @@ func (h *WebhookHandler) handleRetryConfirmation(job *models.Job, webhookReq *We
 		return fmt.Errorf("failed to re-enqueue job for retry: %w", err)
 	}
 
-	log.Printf("🔄 Job scheduled for retry via webhook: ID=%s, RetryAt=%s, Attempt=%d/%d", 
+	log.Printf("🔄 Job scheduled for retry via webhook: ID=%s, RetryAt=%s, Attempt=%d/%d",
 		job.ID, retryAt.Format(time.RFC3339), job.Retries, job.MaxRetries)
-	
+
 	return nil
 }
 
@@ -364,15 +384,15 @@ func (h *WebhookHandler) handleFailureConfirmation(job *models.Job, webhookReq *
 	}
 
 	job.MarkAsFailed(errorMsg)
-	
+
 	// Complete job in queue manager
 	if err := h.queueManager.CompleteJob(job); err != nil {
 		return fmt.Errorf("failed to mark job as failed: %w", err)
 	}
 
-	log.Printf("❌ Job marked as failed via webhook: ID=%s, CallID=%s, Reason=%s", 
-		job.ID, job.CallID, errorMsg)
-	
+	log.Printf("❌ Job marked as failed via webhook: ID=%s, RequestID=%s, Reason=%s",
+		job.ID, job.RequestID, errorMsg)
+
 	return nil
 }
 

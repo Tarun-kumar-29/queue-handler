@@ -7,13 +7,20 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    networks:
+      - queue-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   queue-handler:
     build:
@@ -28,8 +35,8 @@ services:
       - DEFAULT_CONCURRENCY=10
       - HTTP_TIMEOUT_SECONDS=300
       - MAX_RETRIES=3
-      - BACKOFF_DELAY_MS=50000
-      - WEBHOOK_TIMEOUT_SECONDS=30
+      - BACKOFF_DELAY_MS=5000
+      - WEBHOOK_TIMEOUT_SECONDS=600
       - JOB_TTL_HOURS=24
     depends_on:
       redis:
@@ -41,6 +48,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - queue-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Asynq Web UI for monitoring
   asynqmon:
@@ -53,10 +67,19 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - queue-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   redis_data:
+    driver: local
 
 networks:
-  default:
+  queue-network:
+    driver: bridge
     name: queue-handler-network

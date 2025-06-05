@@ -26,8 +26,8 @@ func main() {
 
 	// Load configuration
 	cfg := config.LoadConfig()
-	
-	log.Printf("📋 Config: Redis=%s, Port=%d, Workers=%d", 
+
+	log.Printf("📋 Config: Redis=%s, Port=%d, Workers=%d",
 		cfg.GetRedisAddr(), cfg.ServerPort, cfg.DefaultConcurrency)
 
 	// Initialize Redis client
@@ -41,7 +41,7 @@ func main() {
 	// Initialize worker manager (now supports dedicated workers per queue)
 	workerManager := worker.NewManager(queueManager, cfg)
 	defer workerManager.StopAllWorkers()
-	
+
 	// Workers will start automatically when jobs are enqueued
 	log.Println("🎯 Enhanced worker manager ready - dedicated workers will start on demand")
 
@@ -52,7 +52,7 @@ func main() {
 
 	// Setup routes
 	router := mux.NewRouter()
-	
+
 	// Apply middleware
 	router.Use(middleware.LoggingMiddleware)
 	router.Use(middleware.CORSMiddleware)
@@ -61,7 +61,7 @@ func main() {
 
 	// API routes - same structure as before
 	api := router.PathPrefix("/api").Subrouter()
-	
+
 	// Job management
 	api.HandleFunc("/schedule-job", jobHandler.ScheduleJob).Methods("POST")
 	api.HandleFunc("/job", jobHandler.GetJob).Methods("GET")
@@ -69,7 +69,8 @@ func main() {
 	api.HandleFunc("/job/{id}", jobHandler.DeleteJob).Methods("DELETE")
 	api.HandleFunc("/job/{id}/archive", jobHandler.ArchiveJob).Methods("POST")
 	api.HandleFunc("/jobs/call/{call_id}", jobHandler.GetJobByCallID).Methods("GET")
-	
+	api.HandleFunc("/schedule-bulk-jobs", jobHandler.ScheduleBulkJobs).Methods("POST")
+
 	// Queue management - Enhanced with dedicated worker support
 	api.HandleFunc("/queue/stats", jobHandler.GetQueueStats).Methods("GET")
 	api.HandleFunc("/queue/scale", jobHandler.ScaleQueue).Methods("POST")
@@ -79,10 +80,11 @@ func main() {
 	api.HandleFunc("/queue/{queue}/stop", jobHandler.ManualStopQueue).Methods("POST")
 	api.HandleFunc("/queues", jobHandler.ListQueues).Methods("GET")
 	api.HandleFunc("/queues/active", jobHandler.GetActiveQueuesDetailed).Methods("GET")
-	
+	api.HandleFunc("/queue/clear", jobHandler.ClearQueue).Methods("POST")
+
 	// Worker management
 	api.HandleFunc("/workers/stats", jobHandler.GetWorkerStats).Methods("GET")
-	
+
 	// Webhook management
 	api.HandleFunc("/webhook", webhookHandler.HandleWebhook).Methods("POST")
 	api.HandleFunc("/webhook/pending", webhookHandler.GetWebhookPendingJobs).Methods("GET")
@@ -98,12 +100,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		response := map[string]interface{}{
-			"service":     "queue-handler",
-			"version":     "1.0.0",
-			"backend":     "asynq",
-			"status":      "running",
-			"timestamp":   time.Now().Format(time.RFC3339),
-			"docs":        "See /api endpoints for usage",
+			"service":   "queue-handler",
+			"version":   "1.0.0",
+			"backend":   "asynq",
+			"status":    "running",
+			"timestamp": time.Now().Format(time.RFC3339),
+			"docs":      "See /api endpoints for usage",
 		}
 		json.NewEncoder(w).Encode(response)
 	}).Methods("GET")
@@ -138,7 +140,7 @@ func main() {
 		log.Println("🎛️ Asynq Web UI: Install asynqmon and run:")
 		log.Printf("     asynq dash --redis-addr=%s", cfg.GetRedisAddr())
 		log.Println("     Then open http://localhost:8080")
-		
+
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server failed to start: %v", err)
 		}

@@ -1,50 +1,46 @@
-# Queue Handler 2 - Advanced Queue Management System
+Queue Handler 2 - Generalized HTTP Job Processing System
+A high-performance, Redis-backed queue processing system built with Go, featuring generic HTTP job processing with configurable completion modes and webhook timeouts.
 
-A high-performance, Redis-backed queue processing system built with Go, featuring multiple completion modes for different use cases.
-
-## 🚀 Features
-
-- **Dual Completion Modes**: Immediate and Webhook-based completion
-- **Auto-scaling Workers**: Dynamic worker management with auto-shutdown
-- **Redis Optimization**: High-load optimized Redis connection pooling
-- **Comprehensive Monitoring**: Built-in Asynq dashboard integration
-- **Retry Logic**: Intelligent retry mechanisms with exponential backoff
-- **RESTful API**: Easy integration with HTTP endpoints
-- **Real-time Tracking**: Live job status monitoring and webhook confirmations
-
-## 📋 Table of Contents
-
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Quick Start](#quick-start)
-- [Completion Modes](#completion-modes)
-- [API Endpoints](#api-endpoints)
-- [Monitoring](#monitoring)
-- [Testing](#testing)
-- [Troubleshooting](#troubleshooting)
-
-## 🏗️ Architecture
-
-### Completion Modes
-
-1. **Immediate Mode** (`completion_mode: "immediate"`)
-   - Jobs complete immediately after HTTP response
-   - Perfect for fast APIs and synchronous operations
-   - High throughput, minimal latency
-
-2. **Webhook Mode** (`completion_mode: "webhook"`)
-   - Jobs wait for external webhook confirmation
-   - Ideal for async operations (calls, long-running tasks)
-   - Reliable completion tracking
-
-3. **Auto-detect Mode** (default)
-   - Automatically chooses mode based on `webhook_url` presence
-   - Immediate if no webhook URL, webhook if URL provided
-
-### Components
-
-```
+🚀 Features
+Generic HTTP Job Processing: Process any HTTP request, not limited to specific use cases
+Dual Completion Modes: Immediate and Webhook-based completion with configurable timeouts
+Auto-scaling Workers: Dynamic worker management with auto-shutdown per queue
+Flexible Metadata System: Generic job identification and grouping via metadata
+Bulk Job Scheduling: Submit hundreds of jobs in a single request
+Configurable Timeouts: Per-job webhook timeout configuration with multiple strategies
+Redis Optimization: High-load optimized Redis connection pooling
+Comprehensive Monitoring: Built-in Asynq dashboard integration
+Retry Logic: Intelligent retry mechanisms with exponential backoff
+RESTful API: Easy integration with HTTP endpoints
+Real-time Tracking: Live job status monitoring and webhook confirmations
+Backward Compatibility: Supports legacy call-specific jobs
+📋 Table of Contents
+Architecture
+Installation
+Configuration
+Quick Start
+Job Types
+API Endpoints
+Bulk Job Scheduling
+Webhook Timeouts
+Monitoring
+Testing
+Troubleshooting
+🏗️ Architecture
+Job Processing Modes
+Immediate Mode (completion_mode: "immediate")
+Jobs complete immediately after HTTP response
+Perfect for fast APIs and synchronous operations
+High throughput, minimal latency
+Webhook Mode (completion_mode: "webhook")
+Jobs wait for external webhook confirmation
+Configurable timeout (30s to hours)
+Multiple timeout strategies: fail, retry, complete
+Ideal for async operations requiring confirmation
+Auto-detect Mode (default)
+Automatically chooses mode based on webhook_url presence
+Immediate if no webhook URL, webhook if URL provided
+Generic Job Processing
 ┌─────────────────┐    ┌──────────────┐    ┌─────────────┐
 │   HTTP Client   │───▶│ Queue Handler│───▶│   Redis     │
 └─────────────────┘    └──────────────┘    └─────────────┘
@@ -56,50 +52,34 @@ A high-performance, Redis-backed queue processing system built with Go, featurin
                               │
                               ▼
                        ┌──────────────┐
-                       │ External APIs│
+                       │  Any HTTP API│
                        └──────────────┘
-```
+📦 Installation
+Prerequisites
+Go 1.21 or higher
+Redis 6.0 or higher
+Docker (optional, for monitoring)
+Setup
+Clone the repository:
+bash
+git clone <repository-url>
+cd queue-handler-2
+Install dependencies:
+bash
+go mod tidy
+Start Redis:
+bash
+# Option 1: Local Redis
+redis-server
 
-## 📦 Installation
-
-### Prerequisites
-
-- Go 1.21 or higher
-- Redis 6.0 or higher
-- Docker (optional, for monitoring)
-
-### Setup
-
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd queue-handler-2
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   go mod tidy
-   ```
-
-3. **Start Redis:**
-   ```bash
-   # Option 1: Local Redis
-   redis-server
-   
-   # Option 2: Docker Redis
-   docker run --name redis -d -p 6379:6379 redis:alpine
-   ```
-
-4. **Build and run:**
-   ```bash
-   go run main.go
-   ```
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-```bash
+# Option 2: Docker Redis
+docker run --name redis -d -p 6379:6379 redis:alpine
+Build and run:
+bash
+go run main.go
+⚙️ Configuration
+Environment Variables
+bash
 # Redis Configuration
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
@@ -115,565 +95,521 @@ HTTP_TIMEOUT_SECONDS=300
 DEFAULT_CONCURRENCY=5
 MAX_RETRIES=3
 BACKOFF_DELAY_MS=5000
-WEBHOOK_TIMEOUT_SECONDS=120
+WEBHOOK_TIMEOUT_SECONDS=600  # 10 minutes default
 
 # Job Configuration
 JOB_TTL_HOURS=24
-```
-
-### Redis Optimization
-
-The system includes Redis optimizations for high-load scenarios:
-- Connection pooling (50 connections)
-- Increased timeouts (60s read/write)
-- Retry logic with exponential backoff
-- Connection lifecycle management
-
-## 🚀 Quick Start
-
-### 1. Start the Queue Handler
-
-```bash
+🚀 Quick Start
+1. Start the Queue Handler
+bash
 cd queue-handler-2
 go run main.go
-```
-
-Output:
-```
-📋 Configuration Loaded:
-   Redis: 127.0.0.1:6379 (pool: 50, timeouts: 30s/60s/60s)
-   Server: :3000 (concurrency: 5, retries: 3)
-🚀 Server starting on :3000
-🎛️ Asynq Web UI: Install asynqmon and run:
-     asynq dash --redis-addr=127.0.0.1:6379
-     Then open http://localhost:8080
-```
-
-### 2. Start the Mock Server (for testing)
-
-```bash
+2. Start the Test Server (for testing)
+bash
 cd mimic-server
 node server.js
-```
-
-### 3. Start Monitoring Dashboard
-
-```bash
+3. Start Monitoring Dashboard
+bash
 # Option 1: Docker (recommended)
-docker run --name redis -d -p 6379:6379 redis:alpine
 docker run --rm --name asynqmon -p 8081:8080 --link redis:redis hibiken/asynqmon --redis-addr=redis:6379
 
 # Option 2: Local installation
 go install github.com/hibiken/asynqmon/cmd/asynqmon@latest
 asynqmon --redis-addr=127.0.0.1:6379 --port=8081
-```
+Then open: http://localhost:8081
 
-Then open: **http://localhost:8081**
+🎯 Job Types
+1. Generic HTTP Jobs
+Process any HTTP API request with flexible configuration:
 
-## 🎯 Completion Modes
-
-### Immediate Completion
-
-Perfect for fast APIs, data processing, synchronous operations.
-
-**Example Use Cases:**
-- REST API calls
-- Data transformations
-- Quick validations
-- File processing
-
-**Characteristics:**
-- ✅ Completes immediately after HTTP response
-- ✅ High throughput (no waiting)
-- ✅ Low latency
-- ✅ Simple error handling
-
-### Webhook Completion
-
-Ideal for async operations that need confirmation.
-
-**Example Use Cases:**
-- Phone call initiation
-- Email sending services
-- Long-running data processing
-- Third-party integrations
-
-**Characteristics:**
-- ⏳ Waits for external confirmation
-- 🔄 Reliable completion tracking
-- 📞 Real-time status updates
-- ⚡ Timeout protection
-
-### Auto-detect Mode
-
-Automatically chooses the appropriate mode.
-
-**Logic:**
-- If `webhook_url` is provided → Webhook mode
-- If no `webhook_url` → Immediate mode
-- Can be overridden with explicit `completion_mode`
-
-## 🔗 API Endpoints
-
-### Schedule Job
-
-**Endpoint:** `POST /api/schedule-job`
-
-#### Immediate Completion Job
-
-```bash
+bash
+# Generic API call with immediate completion
 curl -X POST http://localhost:3000/api/schedule-job \
   -H "Content-Type: application/json" \
   -d '{
-    "call_id": "immediate-job-001",
-    "url": "http://localhost:4000/immediate-api",
+    "request_id": "api-call-123",
+    "url": "https://httpbin.org/post",
+    "method": "POST",
+    "headers": {
+      "Authorization": "Bearer your-token",
+      "Content-Type": "application/json"
+    },
+    "body": "{\"message\": \"Hello from queue\", \"timestamp\": \"2024-01-01T00:00:00Z\"}",
+    "queue_name": "api_calls",
+    "completion_mode": "immediate",
+    "concurrency": 3,
+    "metadata": {
+      "user_id": "user123",
+      "job_type": "api_request",
+      "priority": "normal"
+    }
+  }'
+2. Webhook-Based Jobs
+Jobs that wait for external confirmation:
+
+bash
+# Webhook job with timeout configuration
+curl -X POST http://localhost:3000/api/schedule-job \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "webhook-job-456",
+    "url": "https://external-service.com/process",
+    "method": "POST",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-API-Key": "your-api-key"
+    },
+    "body": "{\"data\": \"process this\"}",
+    "queue_name": "external_services",
+    "completion_mode": "webhook",
+    "webhook_url": "http://localhost:3000/api/webhook",
+    "concurrency": 2,
+    "metadata": {
+      "service_name": "external_processor",
+      "webhook_timeout": "5m",
+      "webhook_timeout_strategy": "retry"
+    }
+  }'
+3. Legacy Call Jobs (Backward Compatibility)
+Still supports call-specific jobs:
+
+bash
+# Legacy call job format
+curl -X POST http://localhost:3000/api/schedule-job \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "agent123",
+    "prospect_id": "prospect456", 
+    "call_id": "call789",
+    "url": "http://localhost:4000/initiate-call",
     "method": "POST",
     "headers": {
       "Content-Type": "application/json"
     },
-    "body": "{\"prospectId\":\"test-001\",\"data\":\"immediate processing\"}",
-    "queue_name": "immediate_queue",
-    "completion_mode": "immediate",
-    "max_retries": 3,
+    "body": "{\"prospectId\": \"prospect456\", \"agentId\": \"agent123\"}",
+    "queue_name": "calls",
+    "completion_mode": "webhook",
+    "webhook_url": "http://localhost:3000/api/webhook",
     "concurrency": 3
   }'
-```
+🔗 API Endpoints
+Schedule Single Job
+Endpoint: POST /api/schedule-job
 
-**Response:**
-```json
+Response:
+
+json
 {
   "success": true,
   "job_id": "job_abc123",
-  "call_id": "immediate-job-001",
+  "request_id": "api-call-123",
+  "call_id": "api-call-123",
   "task_id": "task_def456",
-  "message": "Job scheduled in queue 'immediate_queue' with 3 workers (completion: immediate)"
+  "message": "Job scheduled in queue 'api_calls' with 3 workers (completion: immediate)"
 }
-```
+Get Job Status
+bash
+# By job ID
+curl http://localhost:3000/api/job/{job_id}
 
-#### Webhook Completion Job
+# By request ID
+curl http://localhost:3000/api/job/by-request-id/{request_id}
 
-```bash
-curl -X POST http://localhost:3000/api/schedule-job \
-  -H "Content-Type: application/json" \
-  -d '{
-    "call_id": "webhook-job-002",
-    "url": "http://localhost:4000/initiate-call",
-    "method": "POST",
-    "headers": {
-      "Content-Type": "application/json"
-    },
-    "body": "{\"prospectId\":\"test-002\",\"data\":\"async processing\"}",
-    "queue_name": "webhook_queue",
-    "completion_mode": "webhook",
-    "webhook_url": "http://localhost:3000/api/webhook",
-    "max_retries": 3,
-    "concurrency": 2
-  }'
-```
+# By call ID (backward compatibility)
+curl http://localhost:3000/api/job/by-call-id/{call_id}
+Response:
 
-#### Auto-detect Mode Job
-
-```bash
-# Will use immediate mode (no webhook_url)
-curl -X POST http://localhost:3000/api/schedule-job \
-  -H "Content-Type: application/json" \
-  -d '{
-    "call_id": "auto-immediate-003",
-    "url": "http://localhost:4000/immediate-api",
-    "method": "GET",
-    "queue_name": "auto_queue"
-  }'
-
-# Will use webhook mode (webhook_url provided)
-curl -X POST http://localhost:3000/api/schedule-job \
-  -H "Content-Type: application/json" \
-  -d '{
-    "call_id": "auto-webhook-004",
-    "url": "http://localhost:4000/initiate-call",
-    "method": "POST",
-    "body": "{\"prospectId\":\"test-004\"}",
-    "queue_name": "auto_queue",
-    "webhook_url": "http://localhost:3000/api/webhook"
-  }'
-```
-
-### Job Status
-
-**Endpoint:** `GET /api/job/status/{job_id}`
-
-```bash
-curl http://localhost:3000/api/job/status/job_abc123
-```
-
-**Response:**
-```json
+json
 {
-  "job_id": "job_abc123",
-  "call_id": "immediate-job-001",
+  "id": "job_abc123",
+  "request_id": "api-call-123",
+  "url": "https://httpbin.org/post",
+  "method": "POST",
   "status": "completed",
-  "queue_name": "immediate_queue",
+  "queue_name": "api_calls",
   "completion_mode": "immediate",
   "created_at": "2025-06-02T10:30:00Z",
   "completed_at": "2025-06-02T10:30:05Z",
+  "metadata": {
+    "user_id": "user123",
+    "job_type": "api_request"
+  },
   "response": {
     "status_code": 200,
     "duration": "1.234s"
   }
 }
-```
+Queue Management
+bash
+# List all queues
+curl http://localhost:3000/api/queues
 
-### Queue Statistics
+# Get active queues with details
+curl http://localhost:3000/api/queues/active
 
-**Endpoint:** `GET /api/queue/stats`
+# Get queue statistics
+curl http://localhost:3000/api/queue/stats?queue=api_calls
 
-```bash
-# All queues
-curl http://localhost:3000/api/queue/stats
+# Scale queue workers
+curl -X POST "http://localhost:3000/api/queue/scale?queue=api_calls&workers=5"
 
-# Specific queue
-curl http://localhost:3000/api/queue/stats?queue=immediate_queue
-```
+# Start queue manually
+curl -X POST http://localhost:3000/api/queue/start/api_calls?concurrency=3
 
-**Response:**
-```json
-{
-  "queue_name": "immediate_queue",
-  "workers_active": 3,
-  "pending_jobs": 0,
-  "active_jobs": 2,
-  "completed_jobs": 157,
-  "failed_jobs": 3,
-  "total_processed": 160
-}
-```
+# Stop queue
+curl -X POST http://localhost:3000/api/queue/stop/api_calls
+Worker Management
+bash
+# Get worker statistics
+curl http://localhost:3000/api/workers/stats
 
-### Webhook Endpoint
+# Get detailed worker info
+curl http://localhost:3000/api/workers/active
+Webhook Endpoint
+Endpoint: POST /api/webhook
 
-**Endpoint:** `POST /api/webhook`
+External services send confirmations here:
 
-Used by external services to confirm job completion.
-
-```bash
+bash
+# Webhook confirmation
 curl -X POST http://localhost:3000/api/webhook \
   -H "Content-Type: application/json" \
   -d '{
-    "callId": "external-call-id-789",
+    "request_id": "webhook-job-456",
     "status": "completed",
-    "message": "Call processing completed successfully"
+    "response": {
+      "external_id": "ext-12345",
+      "result": "success"
+    }
   }'
-```
+📦 Bulk Job Scheduling
+Simple Bulk Jobs
+bash
+# 100 immediate jobs
+curl -X POST http://localhost:3000/api/schedule-bulk-jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "default_method": "POST",
+    "default_concurrency": 3,
+    "default_headers": {
+      "Content-Type": "application/json"
+    },
+    "jobs": [
+      {
+        "request_id": "bulk-1",
+        "url": "https://httpbin.org/post",
+        "body": "{\"bulk_job\": 1}",
+        "queue_name": "bulk_immediate",
+        "completion_mode": "immediate",
+        "metadata": {"batch": "test_1"}
+      },
+      {
+        "request_id": "bulk-2", 
+        "url": "https://httpbin.org/post",
+        "body": "{\"bulk_job\": 2}",
+        "queue_name": "bulk_immediate",
+        "completion_mode": "immediate",
+        "metadata": {"batch": "test_1"}
+      }
+    ]
+  }'
+Mixed Bulk Jobs
+bash
+# Mixed immediate and webhook jobs
+curl -X POST http://localhost:3000/api/schedule-bulk-jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "default_method": "POST",
+    "default_max_retries": 3,
+    "default_headers": {
+      "Content-Type": "application/json"
+    },
+    "jobs": [
+      {
+        "request_id": "mixed-immediate-1",
+        "url": "https://httpbin.org/post", 
+        "body": "{\"type\": \"immediate\"}",
+        "queue_name": "mixed_immediate",
+        "completion_mode": "immediate",
+        "concurrency": 4,
+        "metadata": {"type": "immediate"}
+      },
+      {
+        "request_id": "mixed-webhook-1",
+        "url": "http://localhost:4000/webhook-api",
+        "body": "{\"type\": \"webhook\"}",
+        "queue_name": "mixed_webhook", 
+        "completion_mode": "webhook",
+        "webhook_url": "http://localhost:3000/api/webhook",
+        "concurrency": 2,
+        "metadata": {"type": "webhook"}
+      },
+      {
+        "agent_id": "agent123",
+        "prospect_id": "prospect456",
+        "url": "http://localhost:4000/initiate-call",
+        "body": "{\"legacy\": true}",
+        "completion_mode": "webhook",
+        "webhook_url": "http://localhost:3000/api/webhook"
+      }
+    ]
+  }'
+Response:
 
-## 📊 Monitoring
+json
+{
+  "success": true,
+  "total_jobs": 3,
+  "successful": 3,
+  "failed": 0,
+  "results": [
+    {
+      "success": true,
+      "job_id": "job_123",
+      "request_id": "mixed-immediate-1",
+      "queue_name": "mixed_immediate",
+      "index": 0
+    }
+  ],
+  "processing_time": "45ms",
+  "queue_summary": {
+    "mixed_immediate": 1,
+    "mixed_webhook": 1,
+    "agent_agent123": 1
+  }
+}
+⏰ Webhook Timeouts
+Timeout Configuration
+Configure webhook timeouts per job:
 
-### Asynq Dashboard
-
-Access the monitoring dashboard at **http://localhost:8081**
-
-**Features:**
-- 📈 Real-time queue statistics
-- 📋 Job listing and details
-- 🔄 Active/pending/completed job counts
-- ❌ Failed job analysis
-- 📊 Performance metrics
-- 🕐 Historical data
-
-**Dashboard Sections:**
-1. **Overview**: System-wide statistics
-2. **Queues**: Per-queue metrics and worker status
-3. **Jobs**: Individual job details and history
-4. **Failed**: Failed job analysis and retry options
-5. **Scheduled**: Future/delayed jobs
-6. **Servers**: Worker server information
-
-### Queue Statistics API
-
-Monitor programmatically via REST API:
-
-```bash
-# System overview
-curl http://localhost:3000/api/system/stats
-
-# Queue details
-curl http://localhost:3000/api/queue/stats?queue=webhook_queue
-
-# Job details
-curl http://localhost:3000/api/job/status/job_abc123
-```
-
-## 🧪 Testing
-
-### Basic Functionality Test
-
-```bash
-# Test immediate completion
+bash
+# Job with custom timeout
 curl -X POST http://localhost:3000/api/schedule-job \
   -H "Content-Type: application/json" \
   -d '{
-    "call_id": "test-immediate-'$(date +%s)'",
-    "url": "http://httpbin.org/delay/2",
+    "request_id": "timeout-test",
+    "url": "http://localhost:4000/webhook-api",
+    "method": "POST",
+    "completion_mode": "webhook",
+    "webhook_url": "http://localhost:3000/api/webhook",
+    "metadata": {
+      "webhook_timeout": "5m",
+      "webhook_timeout_strategy": "retry"
+    }
+  }'
+Timeout Strategies
+Available strategies:
+
+"fail" (default): Mark job as failed when timeout occurs
+"retry": Retry job if timeout occurs (if retries available)
+"complete": Mark job as completed despite timeout
+Timeout Formats
+json
+{
+  "metadata": {
+    "webhook_timeout_seconds": 300,      // 5 minutes
+    "webhook_timeout_minutes": 10,       // 10 minutes
+    "webhook_timeout": "30m",           // 30 minutes (duration string)
+    "webhook_timeout_strategy": "retry"
+  }
+}
+Timeout Priority Order
+webhook_timeout_seconds (job metadata)
+webhook_timeout_minutes (job metadata)
+webhook_timeout (job metadata, duration string)
+Server config WEBHOOK_TIMEOUT_SECONDS
+10 minutes (default)
+📊 Monitoring
+Queue Statistics
+bash
+# System overview
+curl http://localhost:3000/api/queues
+
+# Active queues
+curl http://localhost:3000/api/queues/active
+
+# Specific queue stats
+curl http://localhost:3000/api/queue/stats?queue=api_calls
+Response:
+
+json
+{
+  "queue_name": "api_calls",
+  "pending_jobs": 5,
+  "active_jobs": 3,
+  "completed_jobs": 157,
+  "failed_jobs": 2,
+  "workers_active": 4
+}
+Asynq Dashboard
+Access the monitoring dashboard at http://localhost:8081
+
+Features:
+
+📈 Real-time queue statistics
+📋 Job listing and details
+🔄 Active/pending/completed job counts
+❌ Failed job analysis
+📊 Performance metrics
+🕐 Historical data
+🧪 Testing
+Basic HTTP Job Test
+bash
+# Test immediate HTTP job
+curl -X POST http://localhost:3000/api/schedule-job \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "test-'$(date +%s)'",
+    "url": "https://httpbin.org/delay/2",
     "method": "GET",
     "queue_name": "test_immediate",
-    "completion_mode": "immediate"
+    "completion_mode": "immediate",
+    "metadata": {"test": true}
   }'
 
-# Test webhook completion
+# Test webhook HTTP job  
 curl -X POST http://localhost:3000/api/schedule-job \
   -H "Content-Type: application/json" \
   -d '{
-    "call_id": "test-webhook-'$(date +%s)'",
-    "url": "http://localhost:4000/initiate-call",
+    "request_id": "webhook-test-'$(date +%s)'",
+    "url": "http://localhost:4000/webhook-api",
     "method": "POST",
-    "body": "{\"prospectId\":\"test-'$(date +%s)'\"}",
+    "body": "{\"test\": true}",
     "queue_name": "test_webhook",
     "completion_mode": "webhook",
-    "webhook_url": "http://localhost:3000/api/webhook"
+    "webhook_url": "http://localhost:3000/api/webhook",
+    "metadata": {"test": true}
   }'
-```
+Bulk Job Test
+bash
+# Test bulk job scheduling
+node bulk-test.js
+The test script schedules 350+ jobs across multiple queues:
 
-### Load Testing
+100 immediate jobs across 5 queues
+100 webhook jobs across 4 queues
+150 mixed jobs across multiple queues
+Timeout Test
+bash
+# Test webhook timeout
+curl -X POST http://localhost:3000/api/schedule-job \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "timeout-test-'$(date +%s)'",
+    "url": "http://localhost:4000/webhook-api",
+    "method": "POST",
+    "body": "{\"delay_seconds\": 60}",
+    "completion_mode": "webhook",
+    "webhook_url": "http://localhost:3000/api/webhook",
+    "metadata": {
+      "webhook_timeout": "30s",
+      "webhook_timeout_strategy": "fail"
+    }
+  }'
+Health Checks
+bash
+# Application health
+curl http://localhost:3000/
 
-Use the provided test script for comprehensive testing:
+# Queue health
+curl http://localhost:3000/api/queues/active
 
-```bash
-# Install test dependencies
-npm install axios uuid
+# Test server health
+curl http://localhost:4000/health
+🔧 Troubleshooting
+Common Issues
+1. Jobs Stuck in Processing
+Check:
 
-# Run basic completion mode test
-node test-script.js
-
-# Run auto-restart test
-node test-script.js --auto-restart
-
-# Run individual mode tests
-node test-script.js --immediate
-node test-script.js --webhook
-```
-
-**Test Configurations:**
-- 40 immediate completion queues
-- 40 webhook completion queues
-- 20 auto-detect queues
-- Variable job counts (5-35 per queue)
-- Variable concurrency (1-6 workers)
-
-### Performance Benchmarks
-
-**Expected Performance:**
-- **Immediate Mode**: 50-100 jobs/second
-- **Webhook Mode**: 10-30 jobs/second (depends on external service)
-- **Memory Usage**: ~50-100MB under normal load
-- **Redis Connections**: Up to 50 concurrent connections
-
-## 🔧 Troubleshooting
-
-### Common Issues
-
-#### 1. Redis I/O Timeout Errors
-
-**Symptoms:**
-```
-ERROR: Failed to write server state data: UNKNOWN: redis command error: SADD failed: i/o timeout
-```
-
-**Solutions:**
-```bash
-# Increase Redis timeouts
-redis-cli CONFIG SET timeout 300
-redis-cli CONFIG SET tcp-keepalive 60
-
-# Reduce load
-export DEFAULT_CONCURRENCY=3
-export REDIS_POOL_SIZE=30
-```
-
-#### 2. Port Already in Use
-
-**Symptoms:**
-```
-bind: Only one usage of each socket address is normally permitted
-```
-
-**Solutions:**
-```bash
-# Find and kill process
-netstat -ano | findstr :8080
-taskkill /PID <PID> /F
-
-# Use different port
-asynqmon --redis-addr=127.0.0.1:6379 --port=8081
-```
-
-#### 3. Docker Connection Issues
-
-**Symptoms:**
-```
-host.docker.internal: no such host
-```
-
-**Solutions:**
-```bash
-# Use actual IP
-ipconfig | findstr IPv4
-docker run --rm --name asynqmon -p 8081:8080 hibiken/asynqmon --redis-addr=192.168.1.100:6379
-
-# Use Docker network
-docker run --name redis -d -p 6379:6379 redis:alpine
-docker run --rm --name asynqmon -p 8081:8080 --link redis:redis hibiken/asynqmon --redis-addr=redis:6379
-```
-
-#### 4. Jobs Stuck in Processing
-
-**Check:**
-```bash
+bash
 # Check worker status
-curl http://localhost:3000/api/queue/stats
+curl http://localhost:3000/api/workers/stats
+
+# Check specific queue
+curl http://localhost:3000/api/queue/stats?queue=stuck_queue
 
 # Check Asynq dashboard
 open http://localhost:8081
+2. Webhook Timeouts
+Check job with timeout:
 
-# Check Redis directly
-redis-cli KEYS "asynq:*"
-```
+bash
+curl http://localhost:3000/api/job/by-request-id/timeout-job-id
+Manual webhook confirmation:
 
-#### 5. Webhook Timeouts
-
-**Symptoms:**
-Jobs stuck in "awaiting webhook" status
-
-**Solutions:**
-```bash
-# Increase webhook timeout
-export WEBHOOK_TIMEOUT_SECONDS=300
-
-# Check external service
-curl http://localhost:4000/health
-
-# Manual webhook confirmation
+bash
 curl -X POST http://localhost:3000/api/webhook \
   -H "Content-Type: application/json" \
-  -d '{"callId":"stuck-call-id","status":"completed"}'
-```
+  -d '{
+    "request_id": "stuck-job-id",
+    "status": "completed"
+  }'
+3. Queue Not Auto-Scaling
+Check active queues:
 
-### Debug Commands
+bash
+curl http://localhost:3000/api/queues/active
+Manually start queue:
 
-```bash
+bash
+curl -X POST http://localhost:3000/api/queue/start/queue_name?concurrency=5
+4. High Redis Memory Usage
+Check Redis info:
+
+bash
+redis-cli INFO memory
+redis-cli KEYS "asynq:*" | wc -l
+Clear completed jobs:
+
+bash
+curl -X POST http://localhost:3000/api/queue/clear \
+  -H "Content-Type: application/json" \
+  -d '{"queue_name": "completed_queue"}'
+Debug Commands
+bash
 # Check Redis connection
 redis-cli ping
 
 # Monitor Redis operations
 redis-cli MONITOR
 
-# Check queue contents
-redis-cli KEYS "asynq:*"
+# Check all queues
+redis-cli KEYS "asynq:queues:*"
 
-# View job details
-redis-cli GET "job:job_abc123"
+# Check job details
+redis-cli HGETALL "asynq:job:job_id"
+📈 Production Tips
+Performance Optimization
+Queue Distribution: Spread jobs across multiple queues
+Worker Tuning: Adjust concurrency based on job type
+Timeout Configuration: Set appropriate timeouts per job type
+Bulk Processing: Use bulk endpoints for high-volume scenarios
+Monitoring Setup
+bash
+# Set up alerts for failed jobs
+curl http://localhost:3000/api/queue/stats | jq '.failed_jobs'
 
-# Check system resources
-docker stats
-```
+# Monitor worker scaling
+curl http://localhost:3000/api/workers/stats | jq '.total_workers'
 
-### Log Analysis
+# Track job processing rates
+curl http://localhost:3000/api/queues/active | jq '.active_queues'
+Scaling Recommendations
+Redis: Use Redis Cluster for high availability
+Workers: Scale based on job processing time and volume
+Timeouts: Configure based on external service SLAs
+Monitoring: Set up alerting for queue depth and failure rates
+🎯 Key Capabilities
+✅ Generic HTTP Processing: Queue any HTTP request to any API
+✅ Flexible Job Configuration: Metadata-driven job customization
+✅ Auto-Scaling Workers: Dedicated workers per queue with auto-shutdown
+✅ Configurable Timeouts: Per-job webhook timeout control
+✅ Bulk Job Submission: Handle hundreds of jobs in single requests
+✅ Backward Compatibility: Legacy call jobs still supported
+✅ Real-Time Monitoring: Live dashboard and REST API monitoring
+✅ High Performance: Optimized for enterprise-scale workloads
 
-**Log Patterns to Monitor:**
+Perfect for: API orchestration, async job processing, webhook management, microservice communication, and any HTTP-based workflow automation.
 
-```bash
-# Successful processing
-grep "Job completed" logs/app.log
+Happy Queue Processing! 🚀
 
-# Failed jobs
-grep "Job permanently failed" logs/app.log
-
-# Redis errors
-grep "Redis" logs/app.log | grep ERROR
-
-# Webhook confirmations
-grep "Webhook confirmed" logs/app.log
-```
-
-## 📚 Advanced Usage
-
-### Custom Retry Strategies
-
-```go
-// Custom backoff strategy
-BackoffDelay: func(n int, err error, task *asynq.Task) time.Duration {
-    return time.Duration(n*n) * time.Second // Quadratic backoff
-}
-```
-
-### Queue Prioritization
-
-```bash
-# High priority queue
-curl -X POST http://localhost:3000/api/schedule-job \
-  -d '{"queue_name": "urgent_queue", "concurrency": 10}'
-
-# Low priority queue  
-curl -X POST http://localhost:3000/api/schedule-job \
-  -d '{"queue_name": "background_queue", "concurrency": 1}'
-```
-
-### Scheduled Jobs
-
-```bash
-# Schedule job for future execution
-curl -X POST http://localhost:3000/api/schedule-job \
-  -d '{
-    "call_id": "future-job",
-    "url": "http://example.com/api",
-    "method": "POST",
-    "queue_name": "scheduled_queue",
-    "schedule_time": "2025-06-03T10:00:00Z"
-  }'
-```
-
-## 📈 Production Deployment
-
-### Scaling Recommendations
-
-**Redis:**
-- Use Redis Cluster for high availability
-- Enable persistence with AOF
-- Monitor memory usage and set appropriate maxmemory
-
-**Application:**
-- Deploy multiple instances behind load balancer
-- Use environment-specific configurations
-- Implement health checks
-
-**Monitoring:**
-- Set up alerting for failed jobs
-- Monitor Redis connection pool usage
-- Track job processing latency
-
-### Health Checks
-
-```bash
-# Application health
-curl http://localhost:3000/health
-
-# Redis health
-redis-cli ping
-
-# Queue health
-curl http://localhost:3000/api/queue/stats
-```
-
----
-
-## 📞 Support
-
-For issues and questions:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review logs and monitoring dashboard
-3. Test with simplified configurations
-4. Check Redis connectivity and performance
-
-## 📄 License
-
-This project is licensed under the MIT License.
-
----
-
-**Happy Queue Processing! 🚀**

@@ -28,15 +28,15 @@ type QueueInfo struct {
 
 // Manager handles queue operations with dedicated workers per queue
 type Manager struct {
-	client       *asynq.Client
-	inspector    *asynq.Inspector
-	RedisClient  *redis.Client
-	config       *config.Config
-	
+	client      *asynq.Client
+	inspector   *asynq.Inspector
+	RedisClient *redis.Client
+	config      *config.Config
+
 	// Track active queues and their dedicated workers
 	activeQueues map[string]*QueueInfo
 	queueMutex   sync.RWMutex
-	
+
 	// Callback to notify worker manager about queue changes
 	onQueueStart func(queueName string, concurrency int) error
 	onQueueStop  func(queueName string) error
@@ -45,7 +45,7 @@ type Manager struct {
 // NewManager creates a new queue manager with dedicated worker support
 func NewManager(redisClient *redis.Client, config *config.Config) *Manager {
 	asynqOpt := redisClient.GetAsynqOptions()
-	
+
 	client := asynq.NewClient(asynqOpt)
 	inspector := asynq.NewInspector(asynqOpt)
 
@@ -68,7 +68,7 @@ func NewManager(redisClient *redis.Client, config *config.Config) *Manager {
 func (m *Manager) SetWorkerCallbacks(onStart, onStop func(string, int) error) {
 	m.queueMutex.Lock()
 	defer m.queueMutex.Unlock()
-	
+
 	m.onQueueStart = func(queueName string, concurrency int) error {
 		return onStart(queueName, concurrency)
 	}
@@ -89,9 +89,9 @@ func (m *Manager) EnqueueJob(job *models.Job) error {
 		return fmt.Errorf("failed to store job metadata: %w", err)
 	}
 
-	// Create CallID mapping
-	if err := m.RedisClient.CreateCallIDMapping(job.CallID, job.ID); err != nil {
-		return fmt.Errorf("failed to create call_id mapping: %w", err)
+	// Create RequestID mapping (backward compatible with CallID)
+	if err := m.RedisClient.CreateCallIDMapping(job.RequestID, job.ID); err != nil {
+		return fmt.Errorf("failed to create request_id mapping: %w", err)
 	}
 
 	// Ensure dedicated workers are running for this queue
@@ -144,8 +144,8 @@ func (m *Manager) EnqueueJob(job *models.Job) error {
 	m.RedisClient.IncrementStat(job.QueueName, "total")
 	m.RedisClient.IncrementStat(job.QueueName, "pending")
 
-	log.Printf("📋 Job enqueued to dedicated queue: ID=%s, CallID=%s, Queue=%s, Workers=%d", 
-		job.ID, job.CallID, job.QueueName, m.getQueueConcurrency(job.QueueName))
+	log.Printf("📋 Job enqueued to dedicated queue: ID=%s, RequestID=%s, Queue=%s, Workers=%d",
+		job.ID, job.RequestID, job.QueueName, m.getQueueConcurrency(job.QueueName))
 
 	return nil
 }
@@ -155,7 +155,6 @@ func (m *Manager) ensureQueueWorkers(queueName string, requestedConcurrency int)
 	m.queueMutex.Lock()
 	defer m.queueMutex.Unlock()
 
-	// DEBUG LOGS - Add these lines
 	log.Printf("🔍 DEBUG: ensureQueueWorkers called for %s, requested concurrency: %d", queueName, requestedConcurrency)
 
 	queueInfo, exists := m.activeQueues[queueName]
@@ -163,8 +162,7 @@ func (m *Manager) ensureQueueWorkers(queueName string, requestedConcurrency int)
 	if exists {
 		log.Printf("🔍 DEBUG: Queue %s isActive: %v, concurrency: %d", queueName, queueInfo.IsActive, queueInfo.Concurrency)
 	}
-	log.Printf("🔍 DEBUG: onQueueStart callback is nil: %v", m.onQueueStart == nil)
-	
+
 	// Determine concurrency to use
 	concurrency := requestedConcurrency
 	if concurrency == 0 {
@@ -172,10 +170,10 @@ func (m *Manager) ensureQueueWorkers(queueName string, requestedConcurrency int)
 	}
 	log.Printf("🔍 DEBUG: Final concurrency to use: %d", concurrency)
 
-	// FIXED CONDITION: Check both !exists AND !IsActive
+	// Check both !exists AND !IsActive
 	if !exists || !queueInfo.IsActive {
 		log.Printf("🔍 DEBUG: Need to start workers - exists: %v, isActive: %v", exists, exists && queueInfo.IsActive)
-		
+
 		if !exists {
 			// Start new dedicated workers for this queue
 			queueInfo = &QueueInfo{
@@ -219,14 +217,14 @@ func (m *Manager) ensureQueueWorkers(queueName string, requestedConcurrency int)
 		log.Printf("🔍 DEBUG: Queue %s already active, just updating activity", queueName)
 		// Update existing queue activity
 		queueInfo.LastJobAt = time.Now()
-		
+
 		// Scale workers if different concurrency requested
 		if requestedConcurrency > 0 && requestedConcurrency != queueInfo.Concurrency {
-			log.Printf("📈 Scaling queue %s from %d to %d workers", 
+			log.Printf("📈 Scaling queue %s from %d to %d workers",
 				queueName, queueInfo.Concurrency, concurrency)
 			queueInfo.Concurrency = concurrency
 			queueInfo.WorkerCount = concurrency
-			
+
 			// Restart workers with new concurrency
 			if m.onQueueStop != nil {
 				log.Printf("🔍 DEBUG: Stopping workers for scaling")
@@ -243,6 +241,187 @@ func (m *Manager) ensureQueueWorkers(queueName string, requestedConcurrency int)
 
 	log.Printf("🔍 DEBUG: ensureQueueWorkers completed for %s", queueName)
 	return nil
+}
+
+// EnqueueBulkJobs schedules multiple jobs efficiently with generalized logic
+func (m *Manager) EnqueueBulkJobs(bulkRequest *models.BulkJobRequest) (*models.BulkJobResponse, error) {
+	startTime := time.Now()
+
+	response := &models.BulkJobResponse{
+		TotalJobs:    len(bulkRequest.Jobs),
+		Results:      make([]models.BulkJobResult, len(bulkRequest.Jobs)),
+		QueueSummary: make(map[string]int),
+	}
+
+	log.Printf("📦 Starting bulk job scheduling: %d jobs", response.TotalJobs)
+
+	// Process each job
+	for i, jobItem := range bulkRequest.Jobs {
+		result := models.BulkJobResult{
+			Index:    i,
+			Metadata: jobItem.Metadata,
+		}
+
+		// Handle backward compatibility
+		if jobItem.AgentID != "" {
+			result.AgentID = jobItem.AgentID
+			if result.Metadata == nil {
+				result.Metadata = make(map[string]interface{})
+			}
+			result.Metadata["agent_id"] = jobItem.AgentID
+		}
+		if jobItem.ProspectID != "" {
+			result.ProspectID = jobItem.ProspectID
+			if result.Metadata == nil {
+				result.Metadata = make(map[string]interface{})
+			}
+			result.Metadata["prospect_id"] = jobItem.ProspectID
+		}
+
+		// Convert to JobRequest
+		jobReq := jobItem.ToJobRequest(bulkRequest)
+
+		// Validate required fields
+		if jobReq.URL == "" {
+			result.Success = false
+			result.Error = "URL is required"
+			response.Results[i] = result
+			continue
+		}
+
+		// Set defaults
+		if jobReq.Method == "" {
+			jobReq.Method = "POST"
+		}
+		if jobReq.QueueName == "" {
+			// Create queue name based on metadata for logical grouping
+			queueName := m.generateQueueName(jobReq)
+			jobReq.QueueName = queueName
+		}
+		if jobReq.MaxRetries == 0 {
+			jobReq.MaxRetries = m.config.MaxRetries
+		}
+
+		// Create and enqueue job
+		job := models.NewJob(jobReq)
+
+		// Store metadata in job for tracking
+		if job.AsynqInfo == nil {
+			job.AsynqInfo = make(map[string]interface{})
+		}
+
+		// Copy all metadata to AsynqInfo for tracking
+		if job.Metadata != nil {
+			for k, v := range job.Metadata {
+				job.AsynqInfo[k] = v
+			}
+		}
+
+		if err := m.EnqueueJob(job); err != nil {
+			result.Success = false
+			result.Error = err.Error()
+			log.Printf("❌ Bulk job %d failed: %v", i+1, err)
+		} else {
+			result.Success = true
+			result.JobID = job.ID
+			result.RequestID = job.RequestID
+			result.TaskID = job.TaskID
+			result.QueueName = job.QueueName
+			result.CallID = job.RequestID // Backward compatibility
+			response.Successful++
+
+			// Update queue summary
+			response.QueueSummary[job.QueueName]++
+
+			// Log with metadata context
+			metadataStr := ""
+			if job.Metadata != nil {
+				if agentID := job.GetMetadataString("agent_id"); agentID != "" {
+					metadataStr += fmt.Sprintf("AgentID=%s, ", agentID)
+				}
+				if prospectID := job.GetMetadataString("prospect_id"); prospectID != "" {
+					metadataStr += fmt.Sprintf("ProspectID=%s, ", prospectID)
+				}
+			}
+
+			log.Printf("✅ Bulk job %d/%d: %sJobID=%s, Queue=%s",
+				i+1, response.TotalJobs, metadataStr, job.ID, job.QueueName)
+		}
+
+		response.Results[i] = result
+	}
+
+	// Calculate final stats
+	response.Failed = response.TotalJobs - response.Successful
+	response.Success = response.Failed == 0
+	response.ProcessingTime = time.Since(startTime).String()
+
+	if response.Success {
+		response.Message = fmt.Sprintf("All %d jobs scheduled successfully across %d queues",
+			response.TotalJobs, len(response.QueueSummary))
+	} else {
+		response.Message = fmt.Sprintf("%d of %d jobs scheduled successfully (%d failed)",
+			response.Successful, response.TotalJobs, response.Failed)
+	}
+
+	log.Printf("📦 Bulk scheduling completed: %s (took %s)", response.Message, response.ProcessingTime)
+
+	// Log queue distribution
+	log.Printf("📊 Queue distribution:")
+	for queueName, count := range response.QueueSummary {
+		log.Printf("   %s: %d jobs", queueName, count)
+	}
+
+	return response, nil
+}
+
+// generateQueueName creates a logical queue name based on job metadata
+func (m *Manager) generateQueueName(jobReq *models.JobRequest) string {
+	if jobReq.Metadata == nil {
+		return "default"
+	}
+
+	// Strategy 1: Use agent_id for call-related jobs (backward compatibility)
+	if agentID, ok := jobReq.Metadata["agent_id"].(string); ok && agentID != "" {
+		if len(agentID) > 8 {
+			return fmt.Sprintf("agent_%s", agentID[:8])
+		}
+		return fmt.Sprintf("agent_%s", agentID)
+	}
+
+	// Strategy 2: Use user_id for user-specific jobs
+	if userID, ok := jobReq.Metadata["user_id"].(string); ok && userID != "" {
+		if len(userID) > 8 {
+			return fmt.Sprintf("user_%s", userID[:8])
+		}
+		return fmt.Sprintf("user_%s", userID)
+	}
+
+	// Strategy 3: Use service_name for service-specific jobs
+	if serviceName, ok := jobReq.Metadata["service_name"].(string); ok && serviceName != "" {
+		return fmt.Sprintf("service_%s", serviceName)
+	}
+
+	// Strategy 4: Use job_type for type-specific jobs
+	if jobType, ok := jobReq.Metadata["job_type"].(string); ok && jobType != "" {
+		return fmt.Sprintf("type_%s", jobType)
+	}
+
+	// Strategy 5: Use tenant_id for multi-tenant applications
+	if tenantID, ok := jobReq.Metadata["tenant_id"].(string); ok && tenantID != "" {
+		if len(tenantID) > 8 {
+			return fmt.Sprintf("tenant_%s", tenantID[:8])
+		}
+		return fmt.Sprintf("tenant_%s", tenantID)
+	}
+
+	// Strategy 6: Use priority-based queues
+	if priority, ok := jobReq.Metadata["priority"].(string); ok && priority != "" {
+		return fmt.Sprintf("priority_%s", priority)
+	}
+
+	// Default fallback
+	return "default"
 }
 
 // monitorQueues monitors queue activity and shuts down idle workers
@@ -271,14 +450,14 @@ func (m *Manager) checkIdleQueues() {
 		if time.Since(queueInfo.LastJobAt) > idleTimeout {
 			// Check if queue is actually empty
 			if m.isQueueEmpty(queueName) {
-				log.Printf("🛑 Shutting down idle queue: %s (idle for %v)", 
+				log.Printf("🛑 Shutting down idle queue: %s (idle for %v)",
 					queueName, time.Since(queueInfo.LastJobAt))
-				
+
 				// Shutdown workers
 				if m.onQueueStop != nil {
 					m.onQueueStop(queueName)
 				}
-				
+
 				queueInfo.IsActive = false
 				queueInfo.WorkerCount = 0
 			} else {
@@ -287,6 +466,85 @@ func (m *Manager) checkIdleQueues() {
 			}
 		}
 	}
+}
+
+// Rest of the methods remain the same but with updated logging...
+// [Previous methods like ClearQueue, isQueueEmpty, updateQueueActivity, etc. remain the same
+//  but with RequestID instead of CallID in logging messages]
+
+// ClearQueue removes all jobs from a specific queue
+func (m *Manager) ClearQueue(queueName string) (int, error) {
+	deletedCount := 0
+
+	// Get queue info to check job counts
+	queueInfo, err := m.inspector.GetQueueInfo(queueName)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get queue info: %w", err)
+	}
+
+	totalJobs := queueInfo.Pending + queueInfo.Active + queueInfo.Scheduled +
+		queueInfo.Retry + queueInfo.Archived
+
+	if totalJobs == 0 {
+		return 0, nil // Queue is already empty
+	}
+
+	// Delete pending jobs
+	if queueInfo.Pending > 0 {
+		count, err := m.inspector.DeleteAllPendingTasks(queueName)
+		if err != nil {
+			log.Printf("⚠️ Failed to delete pending tasks: %v", err)
+		} else {
+			deletedCount += count
+		}
+	}
+
+	// Delete scheduled jobs
+	if queueInfo.Scheduled > 0 {
+		count, err := m.inspector.DeleteAllScheduledTasks(queueName)
+		if err != nil {
+			log.Printf("⚠️ Failed to delete scheduled tasks: %v", err)
+		} else {
+			deletedCount += count
+		}
+	}
+
+	// Delete retry jobs
+	if queueInfo.Retry > 0 {
+		count, err := m.inspector.DeleteAllRetryTasks(queueName)
+		if err != nil {
+			log.Printf("⚠️ Failed to delete retry tasks: %v", err)
+		} else {
+			deletedCount += count
+		}
+	}
+
+	// Delete archived jobs
+	if queueInfo.Archived > 0 {
+		count, err := m.inspector.DeleteAllArchivedTasks(queueName)
+		if err != nil {
+			log.Printf("⚠️ Failed to delete archived tasks: %v", err)
+		} else {
+			deletedCount += count
+		}
+	}
+
+	// Note: Active jobs cannot be deleted as they are currently being processed
+	if queueInfo.Active > 0 {
+		log.Printf("⚠️ Queue %s has %d active jobs that cannot be cleared", queueName, queueInfo.Active)
+	}
+
+	// Clear queue metadata
+	m.queueMutex.Lock()
+	if queueInfo, exists := m.activeQueues[queueName]; exists {
+		queueInfo.LastJobAt = time.Now()
+	}
+	m.queueMutex.Unlock()
+
+	log.Printf("🧹 Cleared queue '%s': deleted %d jobs (%d active jobs remain)",
+		queueName, deletedCount, queueInfo.Active)
+
+	return deletedCount, nil
 }
 
 // isQueueEmpty checks if a queue has no pending or active jobs
@@ -313,7 +571,7 @@ func (m *Manager) updateQueueActivity(queueName string) {
 func (m *Manager) getQueueConcurrency(queueName string) int {
 	m.queueMutex.RLock()
 	defer m.queueMutex.RUnlock()
-	
+
 	if queueInfo, exists := m.activeQueues[queueName]; exists {
 		return queueInfo.Concurrency
 	}
@@ -324,7 +582,7 @@ func (m *Manager) getQueueConcurrency(queueName string) int {
 func (m *Manager) GetActiveQueues() map[string]*QueueInfo {
 	m.queueMutex.RLock()
 	defer m.queueMutex.RUnlock()
-	
+
 	result := make(map[string]*QueueInfo)
 	for name, info := range m.activeQueues {
 		// Create a copy to avoid race conditions
@@ -346,18 +604,18 @@ func (m *Manager) ForceShutdownQueue(queueName string) error {
 
 	if queueInfo, exists := m.activeQueues[queueName]; exists && queueInfo.IsActive {
 		log.Printf("🛑 Force shutting down queue: %s", queueName)
-		
+
 		if m.onQueueStop != nil {
 			if err := m.onQueueStop(queueName); err != nil {
 				return err
 			}
 		}
-		
+
 		queueInfo.IsActive = false
 		queueInfo.WorkerCount = 0
 		return nil
 	}
-	
+
 	return fmt.Errorf("queue %s is not active", queueName)
 }
 
@@ -400,7 +658,7 @@ func (m *Manager) RestartQueue(queueName string, concurrency int) error {
 	return nil
 }
 
-// Existing methods remain the same...
+// GetJob returns information about a specific job
 func (m *Manager) GetJob(jobID string) (*models.Job, error) {
 	jobData, err := m.RedisClient.GetJobMetadata(jobID)
 	if err != nil {
@@ -409,25 +667,33 @@ func (m *Manager) GetJob(jobID string) (*models.Job, error) {
 	return models.JobFromJSON(jobData)
 }
 
-func (m *Manager) GetJobByCallID(callID string) (*models.Job, error) {
-	jobID, err := m.RedisClient.GetJobIDByCallID(callID)
+// GetJobByRequestID returns information about a job by RequestID (backward compatible with CallID)
+func (m *Manager) GetJobByRequestID(requestID string) (*models.Job, error) {
+	jobID, err := m.RedisClient.GetJobIDByCallID(requestID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get job by call_id: %w", err)
+		return nil, fmt.Errorf("failed to get job by request_id: %w", err)
 	}
 	return m.GetJob(jobID)
 }
 
+// GetJobByCallID returns information about a job by CallID (backward compatibility)
+func (m *Manager) GetJobByCallID(callID string) (*models.Job, error) {
+	return m.GetJobByRequestID(callID)
+}
+
+// UpdateJob updates job metadata
 func (m *Manager) UpdateJob(job *models.Job) error {
 	return m.updateJobMetadata(job)
 }
 
+// CompleteJob marks a job as completed and updates statistics
 func (m *Manager) CompleteJob(job *models.Job) error {
 	if err := m.updateJobMetadata(job); err != nil {
 		return fmt.Errorf("failed to update job: %w", err)
 	}
 
 	m.RedisClient.DecrementStat(job.QueueName, "processing")
-	
+
 	if job.Status == models.JobStatusCompleted {
 		m.RedisClient.IncrementStat(job.QueueName, "completed")
 		m.RedisClient.RemoveWebhookTracking(job.ID)
@@ -442,6 +708,7 @@ func (m *Manager) CompleteJob(job *models.Job) error {
 	return nil
 }
 
+// CompleteJobAfterWebhook completes a job after webhook confirmation
 func (m *Manager) CompleteJobAfterWebhook(jobID string) error {
 	job, err := m.GetJob(jobID)
 	if err != nil {
@@ -449,7 +716,7 @@ func (m *Manager) CompleteJobAfterWebhook(jobID string) error {
 	}
 
 	if job.Status != models.JobStatusAwaitingHook {
-		return fmt.Errorf("job %s is not awaiting webhook confirmation (status: %s)", 
+		return fmt.Errorf("job %s is not awaiting webhook confirmation (status: %s)",
 			jobID, job.Status)
 	}
 
@@ -488,6 +755,7 @@ func (m *Manager) RetryJobAfterWebhook(jobID string, retryAt time.Time) error {
 	return m.EnqueueJob(job)
 }
 
+// GetQueueStats returns statistics for a specific queue
 func (m *Manager) GetQueueStats(queueName string) (*models.QueueStats, error) {
 	queueInfo, err := m.inspector.GetQueueInfo(queueName)
 	if err != nil {
@@ -510,10 +778,12 @@ func (m *Manager) GetQueueStats(queueName string) (*models.QueueStats, error) {
 	return stats, nil
 }
 
+// ListQueues returns all queues
 func (m *Manager) ListQueues() ([]string, error) {
 	return m.inspector.Queues()
 }
 
+// GetWebhookPendingJobs returns jobs pending webhook confirmation
 func (m *Manager) GetWebhookPendingJobs() ([]string, error) {
 	return m.RedisClient.GetPendingWebhookJobs()
 }
@@ -570,6 +840,7 @@ func (m *Manager) UnpauseQueue(queueName string) error {
 	return m.inspector.UnpauseQueue(queueName)
 }
 
+// Close shuts down the manager and all active queues
 func (m *Manager) Close() error {
 	// Shutdown all active queues
 	m.queueMutex.Lock()
@@ -589,6 +860,7 @@ func (m *Manager) Close() error {
 	return nil
 }
 
+// updateJobMetadata updates job metadata in Redis
 func (m *Manager) updateJobMetadata(job *models.Job) error {
 	job.UpdatedAt = time.Now()
 	jobData, err := job.ToJSON()

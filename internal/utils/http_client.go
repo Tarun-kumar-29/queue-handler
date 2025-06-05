@@ -93,12 +93,14 @@ func (h *HTTPClient) MakeRequest(url, method string, headers map[string]string, 
 // SendWebhook sends a webhook notification with job completion data
 func (h *HTTPClient) SendWebhook(webhookURL string, job *models.Job, response *models.JobResponse) error {
 	payload := &models.WebhookPayload{
-		CallID:      job.CallID,
+		RequestID:   job.RequestID,
 		JobID:       job.ID,
 		Status:      models.JobStatusCompleted,
 		Response:    response,
 		CompletedAt: time.Now(),
 		Attempts:    job.Retries,
+		Metadata:    job.Metadata,
+		CallID:      job.RequestID, // Backward compatibility
 	}
 
 	return h.sendWebhookPayload(webhookURL, job, payload)
@@ -107,12 +109,14 @@ func (h *HTTPClient) SendWebhook(webhookURL string, job *models.Job, response *m
 // SendFailureWebhook sends a webhook notification for failed jobs
 func (h *HTTPClient) SendFailureWebhook(webhookURL string, job *models.Job, errorMsg string) error {
 	payload := &models.WebhookPayload{
-		CallID:      job.CallID,
+		RequestID:   job.RequestID,
 		JobID:       job.ID,
 		Status:      models.JobStatusFailed,
 		Error:       errorMsg,
 		CompletedAt: time.Now(),
 		Attempts:    job.Retries,
+		Metadata:    job.Metadata,
+		CallID:      job.RequestID, // Backward compatibility
 	}
 
 	return h.sendWebhookPayload(webhookURL, job, payload)
@@ -137,7 +141,8 @@ func (h *HTTPClient) sendWebhookPayload(webhookURL string, job *models.Job, payl
 	req.Header.Set("User-Agent", "Queue-Handler-Asynq-Webhook/1.0")
 	req.Header.Set("X-Queue-Handler-Event", "job.completed")
 	req.Header.Set("X-Job-ID", job.ID)
-	req.Header.Set("X-Call-ID", job.CallID)
+	req.Header.Set("X-Request-ID", job.RequestID)
+	req.Header.Set("X-Call-ID", job.RequestID) // Backward compatibility
 	req.Header.Set("X-Job-Status", string(payload.Status))
 
 	// Make request with webhook timeout
